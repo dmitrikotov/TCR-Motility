@@ -1,0 +1,212 @@
+---
+title: "Untitled"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("DESeq2")
+library("ggplot2")
+library("magrittr")
+library("ComplexHeatmap")
+library("stringr")
+```
+
+## Read in master data table and create a dds object
+```{r}
+load("jessica_tbet_ens88_q0_Tue_May_09_2017_2206.rdata")
+load("../../../th17/data/ens88_mouse.rdata")
+load("../../../th17/data/mgi88.rdata")
+
+dds2<-DESeqDataSet(genehits,design=~1)
+colData(dds2)$filename<-colnames(dds2)
+colData(dds2)$celltype<-factor(sapply(strsplit(colnames(dds2),"_"),function(x) x[1]))
+colData(dds2)$condition<-factor(ifelse(stringr::str_detect(colnames(dds2),"nostim"),"nostim","stim"),levels=c("nostim","stim"))
+colData(dds2)$rep<-paste0("rep",sapply(strsplit(colnames(dds2),"_"),function(x) x[2]) %>% gsub("nostim","",.) %>% gsub("stim","",.))
+dds2<-estimateSizeFactors(dds2)
+as.data.frame(colData(dds2))
+DESeq2::plotPCA(normTransform(dds2),intgroup=c("celltype","condition"))+theme_bw()
+```
+
+## Make a table of Mean FPKM values for each condition
+```{r fpkm_table,eval=T}
+fpkm<-fpkm(dds2,robust=TRUE)
+
+f_mean <- fpkm %>% as.data.frame %>% 
+  #dplyr::filter(mgi_symbol %in% c(goi,goi2)) %>%
+  tibble::rownames_to_column(var="ensembl") %>%
+  tidyr::gather(sample,fpkm,-ensembl) %>%
+  dplyr::mutate(time=colData(dds2)[sample,]$celltype) %>%
+  dplyr::mutate(gene=colData(dds2)[sample,]$condition) %>%
+  dplyr::mutate(sample=paste(time,gene,sep="_")) %>%
+  dplyr::group_by(sample,ensembl) %>%
+    dplyr::summarize(mean_fpkm=round(mean(fpkm),3)) %>%
+    dplyr::select(sample,ensembl,mean_fpkm) %>%
+    dplyr::ungroup() %>%
+  tidyr::spread(sample,mean_fpkm) %>% as.data.frame()
+
+rownames(f_mean)<-f_mean$ensembl
+f_mean<-f_mean[,-1]
+colnames(f_mean)<-paste0("fpkm.",colnames(f_mean))
+f_mean["ENSMUSG00000040363",]
+
+```
+
+#Create plots to visualize Data
+```{r}
+gg_plotCounts<-function(x="ENSMUSG00000040363",d=dds2,returnData=F) {
+  if (substr(x,1,7)=="ENSMUSG") {
+    #title<-symbols[grep(x,symbols$gene_id),"gene_name"]
+    title<-mgi[grep(x,mgi$ensembl_gene_id),"mgi_symbol"]
+  } else {
+    title<-x
+    #x<-symbols[grep(paste0("^",title,"$"),symbols$gene_name),"gene_id"]
+    x<-mgi[grep(paste0("^",title,"$"),mgi$mgi_symbol),"ensembl_gene_id"]
+  }
+  
+  if(returnData) {return(plotCounts(d,x,intgroup=c("celltype","condition"),returnData=T))}
+  
+  plotCounts(d,x,intgroup=c("celltype","condition"),returnData=T) %>%
+    tibble::rownames_to_column() %>%
+    ggplot(aes(x=condition, y=count,colour=condition)) +
+    geom_point(position=position_jitter(w=0.1,h=0),size=3) + ggtitle(paste0(title," : ",x)) +
+    stat_summary(fun.y = mean, fun.ymin = mean, fun.ymax = mean,
+                 geom = "crossbar", width = 0.35,size=0.4) +
+    expand_limits(x=0, y = 0) + xlab("") + ylab("Normalized Counts") +
+    facet_grid(~celltype) +    theme_bw() +
+    theme(legend.position="none") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+}
+
+#gg_plotCounts("Tbx21")
+gg_plotCounts("ENSMUSG00000040363")
+gg_plotCounts("Ncor1")
+gg_plotCounts("Cdkn1b")
+
+```
+
+
+```{r}
+# 091118 combine the results with a union and use an intersection
+# dds_nostim_stim<-dds2[,colData(dds2)$celltype=="tbetLO" | colData(dds2)$celltype=="tbetINT" | colData(dds2)$celltype=="tbetHI"]
+dds_nostim_stim<-dds2
+dds_nostim_stim$group <- factor(paste0(dds_nostim_stim$celltype, dds_nostim_stim$condition))
+design(dds_nostim_stim)<-(~group)
+colData(dds_nostim_stim)
+dds_nostim_stim<-DESeq(dds_nostim_stim)
+resultsNames(dds_nostim_stim)
+DESeq2::plotMA(dds_nostim_stim,ylim=c(-12,12))
+
+summary(res_global_tbetLO_raw<-results(dds_nostim_stim,contrast=c("group","tbetLOstim","tbetLOnostim"),alpha=0.05))
+res_global_tbetLO<-as.data.frame(res_global_tbetLO_raw)
+
+
+summary(res_global_tbetINT_raw<-results(dds_nostim_stim,contrast=c("group","tbetINTstim","tbetINTnostim"),alpha=0.05))
+res_global_tbetINT<-as.data.frame(res_global_tbetINT_raw)
+
+summary(res_global_tbetHI_raw<-results(dds_nostim_stim,contrast=c("group","tbetHIstim","tbetHInostim"),alpha=0.05))
+res_global_tbetHI<-as.data.frame(res_global_tbetHI_raw)
+
+
+# Combine results from different cell types
+res_global_tbetLO_raw<-res_global_tbetLO_raw[,c("baseMean","log2FoldChange","padj")]
+colnames(res_global_tbetLO_raw)<-paste0(colnames(res_global_tbetLO_raw),".tbetLO")
+
+res_global_tbetINT_raw<-res_global_tbetINT_raw[,c("log2FoldChange","padj")]
+colnames(res_global_tbetINT_raw)<-paste0(colnames(res_global_tbetINT_raw),".tbetINT")
+
+res_global_tbetHI_raw<-res_global_tbetHI_raw[,c("log2FoldChange","padj")]
+colnames(res_global_tbetHI_raw)<-paste0(colnames(res_global_tbetHI_raw),".tbetHI")
+
+##
+
+
+
+```
+
+# Combine results from different cell types
+```{r}
+all.equal(rownames(res_global_tbetLO_raw),rownames(res_global_tbetINT_raw))
+all.equal(rownames(res_global_tbetINT_raw),rownames(res_global_tbetHI_raw))
+all.equal(rownames(res_global_tbetINT_raw),rownames(f_mean)) #add mean FPKM
+
+global_results<-cbind(res_global_tbetLO_raw,res_global_tbetINT_raw,res_global_tbetHI_raw,f_mean)
+
+global_results$symbol<-mgi[match(rownames(global_results),mgi$ensembl_gene_id),"mgi_symbol"]
+
+dim(global_results<-global_results[global_results$baseMean.tbetLO > 50,])
+
+View(as.data.frame(global_results))
+
+```
+
+## Make a Master list of genes that are UP 2-fold in any dataset and have a FPKM > 2.5 and a p value less than 0.05
+```{r}
+hilim<-2.5
+lolim<-1.0
+
+length(m1<-rownames(subset(global_results, log2FoldChange.tbetLO > 1 & padj.tbetLO<0.05 & fpkm.tbetLO_nostim < lolim & fpkm.tbetLO_stim > hilim)))
+length(m2<-rownames(subset(global_results, log2FoldChange.tbetINT > 1 & padj.tbetINT<0.05 & fpkm.tbetINT_nostim < lolim & fpkm.tbetINT_stim > hilim)))
+length(m3<-rownames(subset(global_results, log2FoldChange.tbetHI > 1 & padj.tbetHI<0.05 & fpkm.tbetHI_nostim < lolim & fpkm.tbetHI_stim > hilim)))
+
+nrow(global_results_subset<-global_results[intersect(m1,intersect(m2,m3)),])
+
+
+View(as.data.frame(global_results_subset))
+
+```
+  
+
+```{r}
+
+
+(g1<-readxl::read_excel("TCR_regulated_genes_heatmap_dimitri.xlsx",sheet=1)[,1,drop=T] %>% grep("ENSMUSG",.,value=T))
+(g2<-readxl::read_excel("TCR_regulated_genes_heatmap_dimitri.xlsx",sheet=2)[,1,drop=T] %>% grep("ENSMUSG",.,value=T))
+(g3<-readxl::read_excel("TCR_regulated_genes_heatmap_dimitri.xlsx",sheet=3)[,1,drop=T] %>% grep("ENSMUSG",.,value=T))
+(g4<-readxl::read_excel("TCR_regulated_genes_heatmap_dimitri.xlsx",sheet=4)[,1,drop=T] %>% grep("ENSMUSG",.,value=T))
+
+#geneid2symbol<-function(x) { mgi[match(x,mgi$ensembl_gene_id),"mgi_symbol"]}
+#geneid2symbol(g1)
+
+#goi<-list(g1=geneid2symbol(g1),
+#          g2=geneid2symbol(g2),
+#          g3=geneid2symbol(g3),
+#          g4=geneid2symbol(g4))
+goi<-list('Actin Cytoskeleton\nOrganization'=g1,'Integrins/\nChemotaxis/\nGPCR Signaling'=g2,'Transcription Factors/\nRepressors'=g3,'T cell-DC\nInteraction'=g4)
+
+goiDF<-mgi[mgi$ensembl_gene_id %in% unlist(goi),]
+rownames(goiDF)<-goiDF$ensembl_gene_id
+goiDF<-goiDF[unlist(goi),]
+goiDF$celltype<-"x"
+for (i in 1:nrow(goiDF)) {goiDF$celltype[i]<-names(goi)[grep(rownames(goiDF)[i],goi)]}
+
+goiDF$celltype=factor(goiDF$celltype,levels=c('Actin Cytoskeleton\nOrganization','Integrins/\nChemotaxis/\nGPCR Signaling',
+                                              'Transcription Factors/\nRepressors','T cell-DC\nInteraction'))
+colnames(fpkm)<-paste(colData(dds2)$celltype,colData(dds2)$condition,colData(dds2)$rep,sep="_")
+#temp<-log2(fpkm[tcell_genes,]+0.1)
+temp<-log2(fpkm[goiDF$ensembl_gene_id,]+0.1)
+rownames(temp)<-mgi[match(rownames(temp),mgi$ensembl_gene_id),"mgi_symbol"]
+temp<-temp[,sort(colnames(temp))]
+temp2<-as.matrix(t(scale(t(temp),center=T,scale=T)))
+# Make Heatmap
+col_fun = circlize::colorRamp2(c(min(temp2),0, max(temp2)), c("blue","white", "red"))
+ht_LO = Heatmap(temp2[,c(which(str_detect(colnames(temp2),"^tbetLO_nostim")),which(str_detect(colnames(temp2),"^tbetLO_stim")))],
+                 column_title = "Tbet LO", rect_gp = gpar(col = "black", lwd = 0.5),
+                 cluster_rows = TRUE, cluster_columns=FALSE,split = goiDF$celltype,
+                 show_row_names=TRUE, row_names_side = "left", col = col_fun,show_heatmap_legend = TRUE)
+ht_INT = Heatmap(temp2[,c(which(str_detect(colnames(temp2),"^tbetINT_nostim")),which(str_detect(colnames(temp2),"^tbetINT_stim")))],
+                    column_title = "Tbet INT", rect_gp = gpar(col = "black", lwd = 0.5),
+                    cluster_rows = TRUE, cluster_columns=FALSE,split = goiDF$celltype,
+                    show_row_names = FALSE,col = col_fun,show_heatmap_legend = FALSE)
+ht_HI = Heatmap(temp2[,c(which(str_detect(colnames(temp2),"^tbetHI_nostim")),which(str_detect(colnames(temp2),"^tbetHI_stim")))], 
+                  column_title = "Tbet HI", rect_gp = gpar(col = "black", lwd = 0.5),
+                  cluster_rows = TRUE, cluster_columns=FALSE,split = goiDF$celltype,
+                  show_row_names = FALSE, col = col_fun, show_heatmap_legend = FALSE)
+
+#pdf(file=paste0("heatmap_",ts,".pdf"),width=8,height=8)
+draw(ht_LO + ht_INT + ht_HI,main_heatmap=1,split = goiDF$celltype,row_dend_side="right")
+#dev.off()
+```
+
